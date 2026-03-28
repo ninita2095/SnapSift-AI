@@ -1,3 +1,6 @@
+from dotenv import load_dotenv
+load_dotenv()
+
 #!/usr/bin/env python3
 """
 SnapSift AI — Intelligent Photo Organizer
@@ -19,6 +22,22 @@ from config import ANTHROPIC_API_KEY, OUTPUT_FOLDER, HASH_SENSITIVITY, MIN_FILE_
 
 # Initialize Claude client
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+# ─────────────────────────────────────────────
+# CHECKPOINT — Save & Resume progress
+# ─────────────────────────────────────────────
+def load_checkpoint(zip_path):
+    checkpoint_file = Path(f".checkpoint_{Path(zip_path).stem}.json")
+    if checkpoint_file.exists():
+        with open(checkpoint_file) as f:
+            data = json.load(f)
+        print(f"📌 Resuming from checkpoint — {len(data)} photos already processed")
+        return data, checkpoint_file
+    return {}, checkpoint_file
+
+def save_checkpoint(checkpoint_file, data):
+    with open(checkpoint_file, 'w') as f:
+        json.dump(data, f)
 
 # ─────────────────────────────────────────────
 # STEP 1 — Extract ZIP
@@ -102,7 +121,7 @@ def classify_photo(img_path):
                      '.png': 'image/png', '.webp': 'image/webp'}
         media_type = media_map.get(suffix, 'image/jpeg')
         response = client.messages.create(
-            model="claude-opus-4-5",
+            model="claude-haiku-4-5-20251001",
             max_tokens=100,
             messages=[{
                 "role": "user",
@@ -118,9 +137,27 @@ def classify_photo(img_path):
                     {
                         "type": "text",
                         "text": """Classify this image into exactly one of these categories:
-KEEP — real personal photo taken by a person (people, events, food, pets, places, travel)
-DISCARD — not a personal photo (memes, screenshots, documents, receipts, flyers, ads, greeting cards, QR codes, viral images)
-REVIEW — uncertain, could go either way
+KEEP — real personal photo taken by a person, including:
+- People, family, friends, selfies
+- Events, celebrations, gatherings
+- Food, pets, travel, nature
+- Places, buildings, rooms
+- Any photo that captures a real personal moment or location
+
+DISCARD — not a personal photo, including:
+- Memes, viral images, jokes
+- Screenshots of conversations or apps
+- Flyers, advertisements, banners
+- Greeting cards (Happy Birthday, etc.)
+- QR codes, barcodes
+- Formal documents (receipts, invoices, forms)
+- News articles, political content
+
+REVIEW — uncertain cases, including:
+- Doors, hallways, entrances (with or without packages)
+- Any photo without people that could be a delivery confirmation
+- Any ambiguous location photo
+- Delivery photos (packages, doors, boxes)
 
 Reply with ONLY one word: KEEP, DISCARD, or REVIEW"""
                     }
@@ -141,15 +178,21 @@ Reply with ONLY one word: KEEP, DISCARD, or REVIEW"""
 def organize_photo(img_path, classification):
     year, month = extract_date(img_path.name)
     if classification == "KEEP":
-        dest_dir = Path(OUTPUT_FOLDER) / "Photos" / year / month
+        dest_dir = Path(OUTPUT_FOLDER) / "PHOTOS" / year / f"{month} {year}"
     elif classification == "DISCARD":
-        dest_dir = Path(OUTPUT_FOLDER) / "Discarded"
+        dest_dir = Path(OUTPUT_FOLDER) / "DISCARDED"
     else:
-        dest_dir = Path(OUTPUT_FOLDER) / "Review"
+        dest_dir = Path(OUTPUT_FOLDER) / "REVIEW"    
+
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest_file = dest_dir / img_path.name
     if dest_file.exists():
-        dest_file = dest_dir / f"{img_path.stem}_dup{img_path.suffix}"
+        # Keep the larger file (better quality)
+        if img_path.stat().st_size > dest_file.stat().st_size:
+            dest_file.unlink()
+            shutil.copy2(img_path, dest_file)
+        # Skip the smaller duplicate silently
+        return dest_dir
     shutil.copy2(img_path, dest_file)
     return dest_dir
 
@@ -171,7 +214,7 @@ Write a brief 3-sentence professional summary of these results for a portfolio.
 Mention the ML concepts used: computer vision classification, perceptual hashing for deduplication, and LLM summarization."""
 
     response = client.messages.create(
-        model="claude-opus-4-5",
+        model="claude-haiku-4-5-20251001",
         max_tokens=300,
         messages=[{"role": "user", "content": prompt}]
     )
@@ -184,7 +227,7 @@ def main():
     print("=" * 50)
     print("  SnapSift AI — Intelligent Photo Organizer")
     print("=" * 50)
-
+    start_time = datetime.now()
     # Get ZIP path
     if len(sys.argv) < 2:
         zip_path = input("\n📁 Enter the path to your ZIP file: ").strip()
@@ -211,17 +254,44 @@ def main():
              "total": len(unique_images), "duplicates": duplicates_removed,
              "date_range": ""}
 
+    # Load checkpoint
+    checkpoint_data, checkpoint_file = load_checkpoint(zip_path)
+
     dates = []
     for i, img_path in enumerate(unique_images, 1):
-        classification = classify_photo(img_path)
+        # Skip already classified photos
+        if img_path.name in checkpoint_data:
+            classification = checkpoint_data[img_path.name]
+            stats[{"keep":"kept","discard":"discarded","review":"review"}[classification.lower()]] += 1
+            year, month = extract_date(img_path.name)
+            if year != "Unknown_Year":
+                dates.append(year)
+            bar = "█" * int((i / len(unique_images)) * 20)
+            print(f"  [{bar:<20}] {i}/{len(unique_images)} — {img_path.name} → {classification} ⏭️ (cached)")
+            continue
+        try:
+            classification = classify_photo(img_path)
+        except Exception as e:
+            if "credit" in str(e).lower() or "billing" in str(e).lower() or "400" in str(e):
+                print(f"\n⚠️  API credits exhausted after {i-1} photos")
+                print(f"   ✅ {stats['kept']} photos classified and saved to PHOTOS/")
+                print(f"   ❌ {stats['discarded']} discarded")
+                print(f"   📁 Remaining {len(unique_images)-i+1} photos moved to REVIEW/")
+                for remaining in unique_images[i-1:]:
+                    organize_photo(remaining, "REVIEW")
+                break
+            else:
+                classification = "REVIEW"
         organize_photo(img_path, classification)
-        stats[classification.lower()] += 1
+        stats[{"keep":"kept","discard":"discarded","review":"review"}[classification.lower()]] += 1
         year, month = extract_date(img_path.name)
         if year != "Unknown_Year":
             dates.append(year)
-        # Progress indicator
         bar = "█" * int((i / len(unique_images)) * 20)
         print(f"  [{bar:<20}] {i}/{len(unique_images)} — {img_path.name} → {classification}")
+        # Save to checkpoint
+        checkpoint_data[img_path.name] = classification
+        save_checkpoint(checkpoint_file, checkpoint_data)
 
     # Date range
     if dates:
@@ -253,6 +323,8 @@ def main():
     # Cleanup temp folder
     shutil.rmtree(extract_dir)
     print(f"\n✅ Done! Results saved to: {OUTPUT_FOLDER}/")
+    elapsed = datetime.now() - start_time
+    print(f"  ⏱️  Time elapsed : {str(elapsed).split('.')[0]}")
     print("=" * 50)
 
 if __name__ == "__main__":
