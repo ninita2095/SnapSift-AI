@@ -20,6 +20,15 @@ jobs:
         run: |
           pip install anthropic Pillow imagehash requests python-dotenv pyinstaller
 
+      - name: Inject API key
+        run: |
+          python -c "
+          content = open('snapsift_gui.py').read()
+          content = content.replace('YOUR_API_KEY_HERE', '${{ secrets.ANTHROPIC_API_KEY }}')
+          open('snapsift_gui.py', 'w').write(content)
+          print('API key injected!')
+          "
+
       - name: Build executable
         run: |
           pyinstaller --windowed --noconsole --name "SnapSift-AI" snapsift_gui.py
