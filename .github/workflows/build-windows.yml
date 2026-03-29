@@ -17,21 +17,18 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: |
-          pip install anthropic Pillow imagehash requests python-dotenv pyinstaller
+        run: pip install anthropic Pillow imagehash requests python-dotenv pyinstaller
 
       - name: Inject API key
+        shell: python
         run: |
-          python -c "
-          content = open('snapsift_gui.py').read()
+          content = open('snapsift_gui.py', encoding='utf-8').read()
           content = content.replace('YOUR_API_KEY_HERE', '${{ secrets.ANTHROPIC_API_KEY }}')
-          open('snapsift_gui.py', 'w').write(content)
+          open('snapsift_gui.py', 'w', encoding='utf-8').write(content)
           print('API key injected!')
-          "
 
       - name: Build executable
-        run: |
-          pyinstaller --windowed --noconsole --name "SnapSift-AI" snapsift_gui.py
+        run: pyinstaller --windowed --noconsole --name "SnapSift-AI" snapsift_gui.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
